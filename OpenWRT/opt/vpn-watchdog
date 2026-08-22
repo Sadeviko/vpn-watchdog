@@ -64,10 +64,7 @@ parse_vless() {
     local alpn="" authority="" flow="" headertype="" host="" mode="" path="" servicename="" type=""
     local packet_encoding=""
 
-    case "$link" in
-        vless://*|hysteria2://*) ;;
-        *) return 1 ;;
-    esac
+    case "$link" in vless://*|hysteria2://*) ;; *) return 1 ;; esac
 
     local protocol="${link%%://*}"
     local raw_reference="${link%%\#*}"; raw_reference="${raw_reference#${protocol}://}"
@@ -108,19 +105,14 @@ parse_vless() {
     [ -n "$address" ] || return 1
     [ "$port" = "$addrport" ] && port="443"
 
-    case "$protocol" in
-        vless)
-            [ "$type" = "raw" ] && type="tcp"
-            [ "$security" != "tls" ] && [ "$security" != "reality" ] && security="none"
-            [ "$security" = "reality" ] && { [ -n "$pbk" ] && [ -n "$sid" ] || return 1; }
-
-            case " tcp ws grpc xhttp " in *" $type "*) ;; *) return 1 ;; esac
-            ;;
-        hysteria2)
-            security="tls"
-            type="quic"
-            ;;
-    esac
+    if [ "$protocol" = "vless" ]; then
+        [ "$type" = "raw" ] && type="tcp"
+        [ "$security" != "tls" ] && [ "$security" != "reality" ] && security="none"
+        [ "$security" = "reality" ] && { [ -n "$pbk" ] && [ -n "$sid" ] || return 1; }
+        case " tcp ws grpc xhttp " in *" $type "*) ;; *) return 1 ;; esac
+    fi
+    
+    [ "$protocol" = "hysteria2" ] && security="tls" && type="hysteria"
 
     COUNTRY=$(printf '%s' "$raw_fragment" | sed 's/%7C/|/g; s/%[0-9A-F][0-9A-F]//g; s/%20/ /g; s/%2C/,/g' | sed 's/|.*//; s/[^a-zA-Z, ]//g; s/^[ ]*//; s/[ ]*$//')
     [ -z "$COUNTRY" ] && COUNTRY="NotSpecified"
@@ -154,7 +146,7 @@ generate_config() {
     local type=$(echo "$json_data" | jsonfilter -e '@.type')
     local packet_encoding=$(echo "$json_data" | jsonfilter -e '@.packet_encoding')
 
-    local encryption="" shortid="" transport="" outbound=""
+    local encryption="" transport="" outbound=""
 
     [ -n "$alpn" ] && alpn=$(echo "$alpn" | sed 's/[^,]\+/"&"/g; s/^/[/;s/$/]/')
 
@@ -202,7 +194,7 @@ generate_config() {
                     transport="${transport} }"
                     ;;
                 *)
-                    transport="\"tcpSettings\": { \"header\": { \"type\": \"${headertype:-none}\" } }"
+                    [ "$security" = "none" ] && transport="\"tcpSettings\": { \"header\": { \"type\": \"${headertype:-none}\" } }"
                     ;;
             esac
 
@@ -225,9 +217,9 @@ generate_config() {
             [ -n "$alpn" ] && tlsSettings="${tlsSettings}, \"alpn\": $alpn"
 
             outbound="{
-    \"protocol\": \"hysteria2\",
-    \"settings\": { \"password\": \"$uid\", \"address\": \"$address\", \"port\": $port },
-    \"streamSettings\": { \"network\": \"quic\", \"security\": \"tls\", \"sockopt\": { \"mark\": 255 }, \"tlsSettings\": { $tlsSettings } }
+    \"protocol\": \"hysteria\",
+    \"settings\": { \"address\": \"$address\", \"port\": $port, \"version\": 2 },
+    \"streamSettings\": { \"network\": \"$type\", \"security\": \"$security\", \"sockopt\": { \"mark\": 255 }, \"hysteriaSettings\": { \"auth\": \"$uid\", \"version\": 2 }, \"tlsSettings\": { $tlsSettings } }
 }"
             ;;
     esac
