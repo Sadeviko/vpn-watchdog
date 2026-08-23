@@ -17,6 +17,10 @@ mkdir -p "${DIR_RUN}/bin" "$DIR_WORK"
 
 [ -s "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 
+json_escape() {
+    printf '%s' "$1" | sed 's~\\~\\\\~g; s~"~\\"~g'
+}
+
 decode_param() {
     printf '%s' "$1" | sed \
         -e 's/+/ /g' \
@@ -31,58 +35,38 @@ decode_param() {
         -e 's/%7B/{/g; s/%7C/|/g; s/%7D/}/g; s/%7E/~/g'
 }
 
-json_escape() {
-    printf '%s' "$1" | sed 's~\\~\\\\~g; s~"~\\"~g'
-}
+generate_config() {
+    local raw="$1"
 
-format_json() {
-    printf '{"protocol":"%s","uid":"%s","address":"%s","port":%s' "$protocol" "$uid" "$address" "$port"
-    [ -n "$allowinsecure" ] && printf ',"allowinsecure":"%s"' "$allowinsecure"
-    [ -n "$fp" ] && printf ',"fp":"%s"' "$fp"
-    [ -n "$pbk" ] && printf ',"pbk":"%s"' "$pbk"
-    [ -n "$security" ] && printf ',"security":"%s"' "$security"
-    [ -n "$sid" ] && printf ',"sid":"%s"' "$sid"
-    [ -n "$sni" ] && printf ',"sni":"%s"' "$sni"
-    [ -n "$spx" ] && printf ',"spx":"%s"' "$spx"
-    [ -n "$alpn" ] && printf ',"alpn":"%s"' "$alpn"
-    [ -n "$authority" ] && printf ',"authority":"%s"' "$authority"
-    [ -n "$flow" ] && printf ',"flow":"%s"' "$flow"
-    [ -n "$headertype" ] && printf ',"headertype":"%s"' "$headertype"
-    [ -n "$host" ] && printf ',"host":"%s"' "$host"
-    [ -n "$mode" ] && printf ',"mode":"%s"' "$mode"
-    [ -n "$path" ] && printf ',"path":"%s"' "$path"
-    [ -n "$servicename" ] && printf ',"servicename":"%s"' "$servicename"
-    [ -n "$type" ] && printf ',"type":"%s"' "$type"
-    [ -n "$packet_encoding" ] && printf ',"packet_encoding":"%s"' "$packet_encoding"
-    printf '}\n'
-}
+    ADDRESS="" PORT="" UID="" SECURITY="" TYPE="" COUNTRY=""
 
-parse_vless() {
-    local link="$1"
-    local address="" port="" uid=""
-    local allowinsecure="" fp="" pbk="" security="" sid="" sni="" spx=""
-    local alpn="" authority="" flow="" headertype="" host="" mode="" path="" servicename="" type=""
+    local allowinsecure="" fp="" pbk="" sid="" sni="" spx=""
+    local alpn="" authority="" flow="" headertype="" host="" mode="" path="" servicename=""
     local packet_encoding=""
+    local protocol="" reference="" fragment="" parameters="" addrport=""
+    local encryption="" transport="" outbound=""
+    local OLD_IFS="" key="" val=""
+    local users="" streamSettings="" tlsSettings=""
 
-    case "$link" in vless://*|hysteria2://*) ;; *) return 1 ;; esac
+    case "$raw" in vless://*|hysteria2://*) ;; *) return 1 ;; esac
 
-    local protocol="${link%%://*}"
-    local raw_reference="${link%%\#*}"; raw_reference="${raw_reference#${protocol}://}"
-    local raw_fragment=$(printf '%s' "$link" | cut -d'#' -f2-)
-    local raw_params="${raw_reference#*\?}"; [ "$raw_params" = "$raw_reference" ] && raw_params=""
-    local addrport="${raw_reference#*@}"; addrport="${addrport%%\?*}"; addrport="${addrport%%/*}"
-    address="${addrport%%:*}"; port="${addrport#*:}"; uid=$(decode_param "${raw_reference%%@*}")
+    protocol="${raw%%://*}"
+    reference="${raw#*://}"; reference="${reference%%\#*}"
+    fragment="${raw#*\#}"; [ "$fragment" = "$raw" ] && fragment=""
+    parameters="${reference#*\?}"; [ "$parameters" = "$reference" ] && parameters=""
+    addrport="${reference#*@}"; addrport="${addrport%%\?*}"; addrport="${addrport%%/*}"
+    ADDRESS="${addrport%%:*}"; PORT="${addrport#*:}"; UID=$(decode_param "${reference%%@*}")
 
-    if [ -n "$raw_params" ]; then
-        local OLD_IFS="$IFS" IFS="&" key val
-        for param in $raw_params; do
+    if [ -n "$parameters" ]; then
+        OLD_IFS="$IFS" IFS="&"
+        for param in $parameters; do
             key="${param%%=*}"; val="${param#*=}"
             key=$(echo "$key" | tr 'A-Z' 'a-z')
             case "$key" in
                 allowinsecure|insecure) [ "$(decode_param "$val")" = "0" ] || [ "$(decode_param "$val")" = "false" ] && allowinsecure="false" ;;
                 fp) fp="$val" ;;
                 pbk) pbk=$(json_escape "$(decode_param "$val")") ;;
-                security) security="$val" ;;
+                security) SECURITY="$val" ;;
                 sid) sid=$(json_escape "$(decode_param "$val")") ;;
                 sni) sni=$(json_escape "$(decode_param "$val")") ;;
                 spx) spx=$(json_escape "$(decode_param "$val")") ;;
@@ -94,70 +78,41 @@ parse_vless() {
                 mode) mode="$val" ;;
                 path) path=$(json_escape "$(decode_param "$val")") ;;
                 servicename) servicename=$(json_escape "$(decode_param "$val")") ;;
-                type) type="$val" ;;
+                type) TYPE="$val" ;;
                 packetencoding) packet_encoding="$val" ;;
             esac
         done
         IFS="$OLD_IFS"
     fi
 
-    [ -n "$uid" ] || return 1
-    [ -n "$address" ] || return 1
-    [ "$port" = "$addrport" ] && port="443"
+    [ -n "$UID" ] || return 1
+    [ -n "$ADDRESS" ] || return 1
+    [ "$PORT" = "$addrport" ] && PORT="443"
 
     if [ "$protocol" = "vless" ]; then
-        [ "$type" = "raw" ] && type="tcp"
-        [ "$security" != "tls" ] && [ "$security" != "reality" ] && security="none"
-        [ "$security" = "reality" ] && { [ -n "$pbk" ] && [ -n "$sid" ] || return 1; }
-        case " tcp ws grpc xhttp " in *" $type "*) ;; *) return 1 ;; esac
+        [ "$TYPE" = "raw" ] && TYPE="tcp"
+        [ "$SECURITY" != "tls" ] && [ "$SECURITY" != "reality" ] && SECURITY="none"
+        [ "$SECURITY" = "reality" ] && { [ -n "$pbk" ] && [ -n "$sid" ] || return 1; }
+        case " tcp ws grpc xhttp " in *" $TYPE "*) ;; *) return 1 ;; esac
     fi
-    
-    [ "$protocol" = "hysteria2" ] && security="tls" && type="hysteria"
 
-    COUNTRY=$(printf '%s' "$raw_fragment" | sed 's/%7C/|/g; s/%[0-9A-F][0-9A-F]//g; s/%20/ /g; s/%2C/,/g' | sed 's/|.*//; s/[^a-zA-Z, ]//g; s/^[ ]*//; s/[ ]*$//')
+    [ "$protocol" = "hysteria2" ] && SECURITY="tls" && TYPE="hysteria"
+
+    COUNTRY=$(printf '%s' "$fragment" | sed 's/%7C/|/g; s/%[0-9A-F][0-9A-F]//g; s/%20/ /g; s/%2C/,/g' | sed 's/|.*//; s/[^a-zA-Z, ]//g; s/^[ ]*//; s/[ ]*$//')
     [ -z "$COUNTRY" ] && COUNTRY="NotSpecified"
 
-    JSON=$(format_json)
-    return 0
-}
-
-generate_config() {
-    local json_data="$1"
-
-    local protocol=$(echo "$json_data" | jsonfilter -e '@.protocol')
-    local uid=$(echo "$json_data" | jsonfilter -e '@.uid')
-    local address=$(echo "$json_data" | jsonfilter -e '@.address')
-    local port=$(echo "$json_data" | jsonfilter -e '@.port')
-    local allowinsecure=$(echo "$json_data" | jsonfilter -e '@.allowinsecure')
-    local fp=$(echo "$json_data" | jsonfilter -e '@.fp')
-    local pbk=$(echo "$json_data" | jsonfilter -e '@.pbk')
-    local security=$(echo "$json_data" | jsonfilter -e '@.security')
-    local sid=$(echo "$json_data" | jsonfilter -e '@.sid')
-    local sni=$(echo "$json_data" | jsonfilter -e '@.sni')
-    local spx=$(echo "$json_data" | jsonfilter -e '@.spx')
-    local alpn=$(echo "$json_data" | jsonfilter -e '@.alpn')
-    local authority=$(echo "$json_data" | jsonfilter -e '@.authority')
-    local flow=$(echo "$json_data" | jsonfilter -e '@.flow')
-    local headertype=$(echo "$json_data" | jsonfilter -e '@.headertype')
-    local host=$(echo "$json_data" | jsonfilter -e '@.host')
-    local mode=$(echo "$json_data" | jsonfilter -e '@.mode')
-    local path=$(echo "$json_data" | jsonfilter -e '@.path')
-    local servicename=$(echo "$json_data" | jsonfilter -e '@.servicename')
-    local type=$(echo "$json_data" | jsonfilter -e '@.type')
-    local packet_encoding=$(echo "$json_data" | jsonfilter -e '@.packet_encoding')
-
-    local encryption="" transport="" outbound=""
+    LINK="${protocol}://${reference}#${COUNTRY}"
 
     [ -n "$alpn" ] && alpn=$(echo "$alpn" | sed 's/[^,]\+/"&"/g; s/^/[/;s/$/]/')
 
     case "$protocol" in
         vless)
-            local users="\"id\": \"$uid\", \"encryption\": \"none\""
-            [ -n "$flow" ] && [ "$type" = "tcp" ] && users="$users, \"flow\": \"$flow\""
+            users="\"id\": \"$UID\", \"encryption\": \"none\""
+            [ -n "$flow" ] && [ "$TYPE" = "tcp" ] && users="$users, \"flow\": \"$flow\""
 
-            case "$security" in
+            case "$SECURITY" in
                 reality)
-                    [ -z "$sni" ] && sni="$address"
+                    [ -z "$sni" ] && sni="$ADDRESS"
                     encryption="\"realitySettings\": {"
                     [ -n "$fp" ] && encryption="${encryption} \"fingerprint\": \"${fp:-chrome}\","
                     encryption="${encryption} \"serverName\": \"$sni\", \"publicKey\": \"$pbk\", \"shortId\": \"$sid\""
@@ -174,10 +129,9 @@ generate_config() {
                     ;;
             esac
 
-            case "$type" in
+            case "$TYPE" in
                 ws)
-                    transport="\"wsSettings\": { \"path\": \"${path:-/}\""
-                    [ -n "${host:-$sni}" ] && transport="${transport}, \"headers\": { \"Host\": \"${host:-$sni}\" }"
+                    transport="\"wsSettings\": { \"path\": \"${path:-/}\", \"headers\": { \"Host\": \"${host:-${sni:-$ADDRESS}}\" }"
                     [ -n "$packet_encoding" ] && transport="${transport}, \"packetEncoding\": \"$packet_encoding\""
                     transport="${transport} }"
                     ;;
@@ -194,32 +148,32 @@ generate_config() {
                     transport="${transport} }"
                     ;;
                 *)
-                    [ "$security" = "none" ] && transport="\"tcpSettings\": { \"header\": { \"type\": \"${headertype:-none}\" } }"
+                    [ "$SECURITY" = "none" ] && transport="\"tcpSettings\": { \"header\": { \"type\": \"${headertype:-none}\" } }"
                     ;;
             esac
 
-            local streamSettings="\"network\": \"$type\", \"security\": \"$security\", \"sockopt\": { \"mark\": 255 }"
+            streamSettings="\"network\": \"$TYPE\", \"security\": \"$SECURITY\", \"sockopt\": { \"mark\": 255 }"
             [ -n "$encryption" ] && streamSettings="${streamSettings}, $encryption"
             [ -n "$transport" ] && streamSettings="${streamSettings}, $transport"
 
             outbound="{
     \"mux\": { \"enabled\": false },
     \"protocol\": \"vless\",
-    \"settings\": { \"vnext\": [ { \"address\": \"$address\", \"port\": $port, \"users\": [ { $users } ] } ] },
+    \"settings\": { \"vnext\": [ { \"address\": \"$ADDRESS\", \"port\": $PORT, \"users\": [ { $users } ] } ] },
     \"streamSettings\": { $streamSettings }
 }"
             ;;
 
         hysteria2)
-            [ -z "$sni" ] && sni="$address"
-            local tlsSettings="\"serverName\": \"$sni\""
+            [ -z "$sni" ] && sni="$ADDRESS"
+            tlsSettings="\"serverName\": \"$sni\""
             [ -n "$allowinsecure" ] && tlsSettings="${tlsSettings}, \"allowInsecure\": $allowinsecure"
             [ -n "$alpn" ] && tlsSettings="${tlsSettings}, \"alpn\": $alpn"
 
             outbound="{
     \"protocol\": \"hysteria\",
-    \"settings\": { \"address\": \"$address\", \"port\": $port, \"version\": 2 },
-    \"streamSettings\": { \"network\": \"$type\", \"security\": \"$security\", \"sockopt\": { \"mark\": 255 }, \"hysteriaSettings\": { \"auth\": \"$uid\", \"version\": 2 }, \"tlsSettings\": { $tlsSettings } }
+    \"settings\": { \"address\": \"$ADDRESS\", \"port\": $PORT, \"version\": 2 },
+    \"streamSettings\": { \"network\": \"$TYPE\", \"security\": \"$SECURITY\", \"sockopt\": { \"mark\": 255 }, \"hysteriaSettings\": { \"auth\": \"$UID\", \"version\": 2 }, \"tlsSettings\": { $tlsSettings } }
 }"
             ;;
     esac
@@ -268,15 +222,14 @@ update_source() {
 
 start_xray() {
     killall "${PATH_XRAY_BIN##*/}" 2>/dev/null
-    generate_config "$JSON" > "$1"
-    
+
     for i in 1 2 3 4 5 6 7 8 9; do
         netstat -an 2>/dev/null | grep -q ":8010.*LISTEN" || netstat -an 2>/dev/null | grep -q ":54321.*LISTEN" || break
         sleep 1
     done
-    
+
     $PATH_XRAY_BIN run -c "$1" >/dev/null 2>&1 &
-    
+
     for i in 1 2 3 4 5 6 7 8 9; do
         netstat -an 2>/dev/null | grep -q ":8010.*LISTEN" && netstat -an 2>/dev/null | grep -q ":54321.*LISTEN" && return 0
         sleep 1
@@ -289,8 +242,8 @@ check_connection() {
     result=$(curl -x socks5h://127.0.0.1:8010 -s --connect-timeout 2 -m 3 -o /dev/null -w "%{http_code} %{time_total}" "$URL_TEST")
     code="${result%% *}"
     timing="${result##* }"
-    
-    echo "$code|$timing|$COUNTRY|$JSON" >> "${DIR_WORK}/debug.log"
+
+    echo "$code|$timing|$LINK" >> "${DIR_WORK}/debug.log"
 
     { [ "$code" = "200" ] || [ "$code" = "301" ]; } && [ "${timing%.*}" -lt 3 ] && TIMING_CHECK=$(printf "%.3f" "$timing") || return 1
 }
@@ -302,8 +255,10 @@ build_favorites() {
         exit 1
     fi
 
-    trap 'rm -f "$FILE_LOCK"' EXIT INT TERM
+    trap 'killall "${PATH_XRAY_BIN##*/}" 2>/dev/null; rm -f "$FILE_LOCK"' EXIT INT TERM
     touch "$FILE_LOCK"
+
+    > "${DIR_WORK}/debug.log"
 
     local tmp_favorites="${DIR_WORK}/favorites.tmp"
     > "$tmp_favorites"
@@ -315,48 +270,44 @@ build_favorites() {
 
     while IFS= read -r line || [ -n "$line" ]; do
         [ -z "$line" ] && continue
-        parse_vless "$line" || continue
-        [ -z "$JSON" ] && continue
+
+        generate_config "$line" > "${FILE_XRAY_CONF%.json}.tmp.json" || continue
+
         [ -n "$BLACKLIST_WORD" ] && echo "$line" | grep -qiE "$BLACKLIST_WORD" && continue
         [ -n "$COUNTRY_EXCLUDE" ] && echo "$COUNTRY" | grep -qiE "$COUNTRY_EXCLUDE" && continue
 
         count=$((count + 1))
-        echo -ne "\r Processing: [$count/$total] ⏳"
+        printf "\r Processing: [$count/$total] ⏳"
 
         if start_xray "${FILE_XRAY_CONF%.json}.tmp.json"; then
             if check_connection; then
-                echo "${TIMING_CHECK}|${JSON}|${COUNTRY}" >> "$tmp_favorites"
+                echo "${TIMING_CHECK}|${LINK}" >> "$tmp_favorites"
                 active=$((active + 1))
             fi
         fi
     done < "$FILE_SOURCE"
 
     local end_build=$(date +%s)
-    echo -e "\r Processing: [$count/$total] ✅"
+    printf "\r Processing: [$count/$total] ✅\n"
     killall "${PATH_XRAY_BIN##*/}" 2>/dev/null
 
     if [ -s "$tmp_favorites" ]; then
         sort -t'|' -k1 -n "$tmp_favorites" | awk -F'|' '
         {
-            match($2, /"address":"[^"]*"/); split(substr($2, RSTART, RLENGTH), a, "\""); addr = a[4]
-            match($2, /"uid":"[^"]*"/); split(substr($2, RSTART, RLENGTH), u, "\""); uid = u[4]
-            if (addr && uid && !seen_a[addr]++ && !seen_u[uid]++) {
-                print $2 "|" $3
-            }
+            match($2, /@([^:?]+)/); addr = substr($2, RSTART+1, RLENGTH-1)
+            match($2, /:\/\/([^@]+)/); uid = substr($2, RSTART+3, RLENGTH-3)
+            if (addr && uid && !seen_a[addr]++ && !seen_u[uid]++) print $2
         }' | head -15 > "$FILE_FAVORITES"
     fi
 
     echo "=====FAVORITES====="
 
     if [ -s "$FILE_FAVORITES" ]; then
-        local timing address port security type
-        while IFS='|' read -r JSON COUNTRY; do
-            timing=$(grep -F "|${JSON}|" "$tmp_favorites" | cut -d'|' -f1 | head -1)
-            address=$(echo "$JSON" | jsonfilter -e '@.address')
-            port=$(echo "$JSON" | jsonfilter -e '@.port')
-            security=$(echo "$JSON" | jsonfilter -e '@.security')
-            type=$(echo "$JSON" | jsonfilter -e '@.type')
-            printf " %-7s | %-15s | %-25.25s | %-35.35s\n" "${timing}s" "[$security/$type]" "$COUNTRY" "$address:$port"
+        local timing
+        while IFS= read -r link; do
+            timing=$(grep -F "|${link}" "$tmp_favorites" | cut -d'|' -f1 | head -1)
+            generate_config "$link" > /dev/null
+            printf " %-7s | %-15s | %-25.25s | %-35.35s\n" "${timing}s" "[$SECURITY/$TYPE]" "$COUNTRY" "$ADDRESS:$PORT"
         done < "$FILE_FAVORITES"
         echo "==================="
         echo " Actives: $active | Time: $((end_build - start_build))s"
@@ -374,29 +325,34 @@ switch_next() {
         exit 1
     fi
 
-    trap 'rm -f "$FILE_LOCK"' EXIT INT TERM
+    trap 'killall "${PATH_XRAY_BIN##*/}" 2>/dev/null; rm -f "$FILE_LOCK"' EXIT INT TERM
     touch "$FILE_LOCK"
 
-    local current_address=$(jsonfilter -e '@.outbounds[0]..address' < "$FILE_XRAY_CONF" 2>/dev/null)
+    local current_address=""
+    [ -f "$FILE_XRAY_CONF" ] && current_address=$(jsonfilter -e '@.outbounds[0]..address' < "$FILE_XRAY_CONF" 2>/dev/null)
+
     local first="" found=0 next=""
 
-    while IFS='|' read -r JSON COUNTRY || [ -n "$JSON" ]; do
-        [ -z "$JSON" ] && continue
-        [ -z "$first" ] && first="$JSON"
-        local address=$(echo "$JSON" | jsonfilter -e '@.address')
-        if [ "$found" -eq 1 ] && [ "$address" != "$current_address" ]; then
-            next="$JSON"
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        [ -z "$first" ] && first="$line"
+
+        generate_config "$line" > /dev/null || continue
+
+        if [ "$found" -eq 1 ] && [ "$ADDRESS" != "$current_address" ]; then
+            next="$line"
             break
         fi
-        [ "$address" = "$current_address" ] && found=1
+        [ "$ADDRESS" = "$current_address" ] && found=1
     done < "$FILE_FAVORITES"
 
     [ -z "$next" ] && next="$first"
-    JSON="$next"
+
+    generate_config "$next" > "$FILE_XRAY_CONF" || exit 1
 
     if start_xray "$FILE_XRAY_CONF"; then
         if check_connection; then
-            echo "Info: Switched to next server: $(echo "$next" | jsonfilter -e '@.address'):$(echo "$next" | jsonfilter -e '@.port')"
+            echo "Info: Switched to next server: $ADDRESS:$PORT"
             rm -f "$FILE_LOCK"
             exit 0
         fi
@@ -413,35 +369,30 @@ main() {
         exit 1
     fi
 
+    trap 'killall "${PATH_XRAY_BIN##*/}" 2>/dev/null; rm -f "$FILE_LOCK"' EXIT INT TERM
+    touch "$FILE_LOCK"
+
     if [ -f "$FILE_XRAY_CONF" ] && check_connection; then
         local current_address=$(jsonfilter -e '@.outbounds[0]..address' < "$FILE_XRAY_CONF" 2>/dev/null)
         if [ -n "$current_address" ] && grep -q "$current_address" "$FILE_FAVORITES" 2>/dev/null; then
             echo "Info: The connection works!"
+            rm -f "$FILE_LOCK"
             exit 0
         fi
     fi
 
-    trap 'rm -f "$FILE_LOCK"' EXIT INT TERM
-    touch "$FILE_LOCK"
-
-    local address="" port="" found=0
-
     if [ -s "$FILE_FAVORITES" ]; then
-        while IFS='|' read -r JSON COUNTRY || [ -n "$JSON" ]; do
-            [ -z "$JSON" ] && continue
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            
+            generate_config "$line" > "$FILE_XRAY_CONF" || continue
+            
             if start_xray "$FILE_XRAY_CONF" && check_connection; then
-                address=$(echo "$JSON" | jsonfilter -e '@.address')
-                port=$(echo "$JSON" | jsonfilter -e '@.port')
-                found=1
-                break
+                echo "Info: Connection established, current server $ADDRESS:$PORT."
+                rm -f "$FILE_LOCK"
+                exit 0
             fi
         done < "$FILE_FAVORITES"
-    fi
-
-    if [ "$found" -eq 1 ]; then
-        echo "Info: Connection established, current server $address:$port."
-        rm -f "$FILE_LOCK"
-        exit 0
     fi
 
     rm -f "$FILE_LOCK"
