@@ -8,7 +8,7 @@ FILE_FAVORITES="${DIR_WORK}/favorites.txt"
 FILE_LOCK="${DIR_WORK}/vpn-watchdog.lock"
 FILE_XRAY_CONF="${DIR_WORK}/xray-config.json"
 PATH_XRAY_BIN="${DIR_RUN}/bin/xray_softfloat"
-URL_SOURCE="https://gitlab.com/igareck/vpn-configs-for-russia/-/raw/main/BLACK_VLESS_RUS_mobile.txt?ref_type=heads"
+URL_SOURCE="https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS.txt"
 URL_TEST="http://www.google.com"
 BLACKLIST_WORD=""
 COUNTRY_EXCLUDE=""
@@ -38,7 +38,7 @@ decode_param() {
 generate_config() {
     local raw="$1"
 
-    ADDRESS="" PORT="" UID="" SECURITY="" TYPE="" COUNTRY=""
+    UID="" ADDRESS="" PORT="" SECURITY="" TYPE="" COUNTRY="" LINK=""
 
     local allowinsecure="" fp="" pbk="" sid="" sni="" spx=""
     local alpn="" authority="" flow="" headertype="" host="" mode="" path="" servicename=""
@@ -148,7 +148,7 @@ generate_config() {
                     transport="${transport} }"
                     ;;
                 *)
-                    [ "$SECURITY" = "none" ] && transport="\"tcpSettings\": { \"header\": { \"type\": \"${headertype:-none}\" } }"
+                    [ -n "$headertype" ] && [ "$headertype" != "none" ] && transport="\"tcpSettings\": { \"header\": { \"type\": \"$headertype\" } }"
                     ;;
             esac
 
@@ -245,7 +245,7 @@ check_connection() {
 
     echo "$code|$timing|$LINK" >> "${DIR_WORK}/debug.log"
 
-    { [ "$code" = "200" ] || [ "$code" = "301" ]; } && [ "${timing%.*}" -lt 3 ] && TIMING_CHECK=$(printf "%.3f" "$timing") || return 1
+    { [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; } && [ "${timing%.*}" -lt 3 ] && TIMING_CHECK=$(printf "%.3f" "$timing") || return 1
 }
 
 build_favorites() {
@@ -296,7 +296,26 @@ build_favorites() {
         {
             match($2, /@([^:?]+)/); addr = substr($2, RSTART+1, RLENGTH-1)
             match($2, /:\/\/([^@]+)/); uid = substr($2, RSTART+3, RLENGTH-3)
-            if (addr && uid && !seen_a[addr]++ && !seen_u[uid]++) print $2
+            if (!addr || !uid) next
+
+            if (!seen_a[addr]++) {
+                if (!seen_u[uid]++) {
+                    # Приоритет 1: уникальные IP + уникальные UID
+                    print $2
+                    count++
+                } else {
+                    # Буфер: уникальные IP + общий UID
+                    backup[++bcount] = $2
+                }
+            }
+        }
+        END {
+            if (count < 15) {
+                for (i = 1; i <= bcount && count < 15; i++) {
+                    print backup[i]
+                    count++
+                }
+            }
         }' | head -15 > "$FILE_FAVORITES"
     fi
 
@@ -414,5 +433,6 @@ case "$1" in
     build) build_favorites ;;
     next) switch_next ;;
     main) main ;;
-    *) echo "Usage: $0 {update|build|next|main}"; exit 1 ;;
+    all) update_source && build_favorites && main ;;
+    *) echo "Usage: $0 {update|build|next|main|all}"; exit 1 ;;
 esac
