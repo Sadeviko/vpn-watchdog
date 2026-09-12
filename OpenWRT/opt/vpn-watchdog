@@ -48,9 +48,12 @@ generate_config() {
     local OLD_IFS="" key="" val=""
     local users="" streamSettings="" tlsSettings=""
 
-    case "$raw" in vless://*|hysteria2://*) ;; *) return 1 ;; esac
+    case "$raw" in
+        vless://*) protocol="vless" ;;
+        hysteria2://*|hy2://*) protocol="hysteria2" ;;
+        *) return 1 ;;
+    esac
 
-    protocol="${raw%%://*}"
     reference="${raw#*://}"; reference="${reference%%\#*}"
     fragment="${raw#*\#}"; [ "$fragment" = "$raw" ] && fragment=""
     parameters="${reference#*\?}"; [ "$parameters" = "$reference" ] && parameters=""
@@ -212,7 +215,7 @@ JSON
 update_source() {
     echo "Info: Trying to download source file..."
     if curl -ksSL --connect-timeout 7 -m 9 "$URL_SOURCE" > "$FILE_SOURCE"; then
-        echo "Info: Source file updated, contains $(grep -cE '^(vless|hysteria2)://' "$FILE_SOURCE" 2>/dev/null || echo "0") lines."
+        echo "Info: Source file updated, contains $(grep -cE '^(vless|hysteria2|hy2)://' "$FILE_SOURCE" 2>/dev/null || echo "0") lines."
         return 0
     else
         echo "Error: Failed to download source file!"
@@ -255,7 +258,7 @@ build_favorites() {
         exit 1
     fi
 
-    trap 'killall "${PATH_XRAY_BIN##*/}" 2>/dev/null; rm -f "$FILE_LOCK"' EXIT INT TERM
+    trap 'rm -f "$FILE_LOCK"' EXIT INT TERM
     touch "$FILE_LOCK"
 
     > "${DIR_WORK}/debug.log"
@@ -265,7 +268,7 @@ build_favorites() {
     > "$FILE_FAVORITES"
 
     local count=0 active=0
-    local total=$(grep -cE '^(vless|hysteria2)://' "$FILE_SOURCE" 2>/dev/null || echo "0")
+    local total=$(grep -cE '^(vless|hysteria2|hy2)://' "$FILE_SOURCE" 2>/dev/null || echo "0")
     local start_build=$(date +%s)
 
     while IFS= read -r line || [ -n "$line" ]; do
@@ -300,23 +303,31 @@ build_favorites() {
 
             if (!seen_a[addr]++) {
                 if (!seen_u[uid]++) {
-                    # Приоритет 1: уникальные IP + уникальные UID
-                    print $2
+                    if (count < 15) print $2
                     count++
                 } else {
-                    # Буфер: уникальные IP + общий UID
-                    backup[++bcount] = $2
+                    backup1[++b1] = $2
+                }
+            } else {
+                if (seen_u[uid]++) {
+                    backup3[++b3] = $2
                 }
             }
         }
         END {
             if (count < 15) {
-                for (i = 1; i <= bcount && count < 15; i++) {
-                    print backup[i]
+                for (i = 1; i <= b1 && count < 15; i++) {
+                    print backup1[i]
                     count++
                 }
             }
-        }' | head -15 > "$FILE_FAVORITES"
+            if (count < 15) {
+                for (i = 1; i <= b3 && count < 15; i++) {
+                    print backup3[i]
+                    count++
+                }
+            }
+        }' > "$FILE_FAVORITES"
     fi
 
     echo "=====FAVORITES====="
@@ -344,12 +355,10 @@ switch_next() {
         exit 1
     fi
 
-    trap 'killall "${PATH_XRAY_BIN##*/}" 2>/dev/null; rm -f "$FILE_LOCK"' EXIT INT TERM
+    trap 'rm -f "$FILE_LOCK"' EXIT INT TERM
     touch "$FILE_LOCK"
 
-    local current_address=""
-    [ -f "$FILE_XRAY_CONF" ] && current_address=$(jsonfilter -e '@.outbounds[0]..address' < "$FILE_XRAY_CONF" 2>/dev/null)
-
+    local current_address=$(jsonfilter -e '@.outbounds[0].settings.address' -e '@.outbounds[0].settings.vnext[0].address' < "$FILE_XRAY_CONF" 2>/dev/null | grep -m1 .)
     local first="" found=0 next=""
 
     while IFS= read -r line || [ -n "$line" ]; do
@@ -388,11 +397,11 @@ main() {
         exit 1
     fi
 
-    trap 'killall "${PATH_XRAY_BIN##*/}" 2>/dev/null; rm -f "$FILE_LOCK"' EXIT INT TERM
+    trap 'rm -f "$FILE_LOCK"' EXIT INT TERM
     touch "$FILE_LOCK"
 
     if [ -f "$FILE_XRAY_CONF" ] && check_connection; then
-        local current_address=$(jsonfilter -e '@.outbounds[0]..address' < "$FILE_XRAY_CONF" 2>/dev/null)
+        local current_address=$(jsonfilter -e '@.outbounds[0].settings.address' -e '@.outbounds[0].settings.vnext[0].address' < "$FILE_XRAY_CONF" 2>/dev/null | grep -m1 .)
         if [ -n "$current_address" ] && grep -q "$current_address" "$FILE_FAVORITES" 2>/dev/null; then
             echo "Info: The connection works!"
             rm -f "$FILE_LOCK"
