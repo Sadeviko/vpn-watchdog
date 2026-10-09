@@ -58,7 +58,7 @@ generate_config() {
     fragment="${raw#*\#}"; [ "$fragment" = "$raw" ] && fragment=""
     parameters="${reference#*\?}"; [ "$parameters" = "$reference" ] && parameters=""
     addrport="${reference#*@}"; addrport="${addrport%%\?*}"; addrport="${addrport%%/*}"
-    ADDRESS="${addrport%%:*}"; PORT="${addrport#*:}"; UID=$(decode_param "${reference%%@*}")
+    UID=$(decode_param "${reference%%@*}"); ADDRESS="${addrport%%:*}"; PORT="${addrport#*:}"
 
     if [ -n "$parameters" ]; then
         OLD_IFS="$IFS" IFS="&"
@@ -95,7 +95,7 @@ generate_config() {
     if [ "$protocol" = "vless" ]; then
         [ "$TYPE" = "raw" ] && TYPE="tcp"
         [ "$SECURITY" != "tls" ] && [ "$SECURITY" != "reality" ] && SECURITY="none"
-        [ "$SECURITY" = "reality" ] && { [ -n "$pbk" ] && [ -n "$sid" ] || return 1; }
+        [ "$SECURITY" = "reality" ] && [ -n "$pbk" ] || return 1
         case " tcp ws grpc xhttp " in *" $TYPE "*) ;; *) return 1 ;; esac
     fi
 
@@ -118,7 +118,8 @@ generate_config() {
                     [ -z "$sni" ] && sni="$ADDRESS"
                     encryption="\"realitySettings\": {"
                     [ -n "$fp" ] && encryption="${encryption} \"fingerprint\": \"${fp:-chrome}\","
-                    encryption="${encryption} \"serverName\": \"$sni\", \"publicKey\": \"$pbk\", \"shortId\": \"$sid\""
+                    encryption="${encryption} \"serverName\": \"$sni\", \"publicKey\": \"$pbk\""
+                    [ -n "$sid" ] && encryption="${encryption}, \"shortId\": \"$sid\""
                     [ -n "$spx" ] && encryption="${encryption}, \"spiderX\": \"$spx\""
                     encryption="${encryption} }"
                     ;;
@@ -141,7 +142,7 @@ generate_config() {
                 grpc)
                     transport="\"grpcSettings\": { \"serviceName\": \"${servicename:-grpc}\""
                     [ -n "$authority" ] && transport="${transport}, \"authority\": \"$authority\""
-                    [ "$mode" = "gun" ] && transport="${transport}, \"multiMode\": true"
+                    [ "$mode" = "gun" ] || [ "$mode" = "multi" ] && transport="${transport}, \"multiMode\": true"
                     transport="${transport} }"
                     ;;
                 xhttp)
@@ -215,7 +216,7 @@ JSON
 update_source() {
     echo "Info: Trying to download source file..."
     if curl -ksSL --connect-timeout 7 -m 9 "$URL_SOURCE" > "$FILE_SOURCE"; then
-        echo "Info: Source file updated, contains $(grep -cE '^(vless|hysteria2|hy2)://' "$FILE_SOURCE" 2>/dev/null || echo "0") lines."
+        echo "Info: Source file updated, contains $(grep -cE '^(vless|hysteria2|hy2)://' "$FILE_SOURCE" 2>/dev/null || true) lines."
         return 0
     else
         echo "Error: Failed to download source file!"
@@ -268,7 +269,7 @@ build_favorites() {
     > "$FILE_FAVORITES"
 
     local count=0 active=0
-    local total=$(grep -cE '^(vless|hysteria2|hy2)://' "$FILE_SOURCE" 2>/dev/null || echo "0")
+    local total=$(grep -cE '^(vless|hysteria2|hy2)://' "$FILE_SOURCE" 2>/dev/null || true)
     local start_build=$(date +%s)
 
     while IFS= read -r line || [ -n "$line" ]; do
@@ -292,6 +293,7 @@ build_favorites() {
 
     local end_build=$(date +%s)
     printf "\r Processing: [$count/$total] ✅\n"
+
     killall "${PATH_XRAY_BIN##*/}" 2>/dev/null
 
     if [ -s "$tmp_favorites" ]; then
@@ -303,14 +305,14 @@ build_favorites() {
 
             if (!seen_a[addr]++) {
                 if (!seen_u[uid]++) {
-                    if (count < 15) print $2
+                    if (count < 15) print $1"|"$2
                     count++
                 } else {
-                    backup1[++b1] = $2
+                    backup1[++b1] = $1"|"$2
                 }
             } else {
                 if (seen_u[uid]++) {
-                    backup3[++b3] = $2
+                    backup3[++b3] = $1"|"$2
                 }
             }
         }
@@ -327,7 +329,7 @@ build_favorites() {
                     count++
                 }
             }
-        }' > "$FILE_FAVORITES"
+        }' | sort -t'|' -k1 -n | cut -d'|' -f2- > "$FILE_FAVORITES"
     fi
 
     echo "=====FAVORITES====="
@@ -348,49 +350,6 @@ build_favorites() {
     rm -f "${FILE_XRAY_CONF%.json}.tmp.json" "$FILE_LOCK"
 }
 
-switch_next() {
-    if [ -f "$FILE_LOCK" ] || [ ! -s "$FILE_FAVORITES" ]; then
-        [ -f "$FILE_LOCK" ] && echo "Warning: Another instance is running (lock file exists)."
-        [ -f "$FILE_LOCK" ] || echo "Warning: Favorites file not found. Use 'vless-watchdog build'."
-        exit 1
-    fi
-
-    trap 'rm -f "$FILE_LOCK"' EXIT INT TERM
-    touch "$FILE_LOCK"
-
-    local current_address=$(jsonfilter -e '@.outbounds[0].settings.address' -e '@.outbounds[0].settings.vnext[0].address' < "$FILE_XRAY_CONF" 2>/dev/null | grep -m1 .)
-    local first="" found=0 next=""
-
-    while IFS= read -r line || [ -n "$line" ]; do
-        [ -z "$line" ] && continue
-        [ -z "$first" ] && first="$line"
-
-        generate_config "$line" > /dev/null || continue
-
-        if [ "$found" -eq 1 ] && [ "$ADDRESS" != "$current_address" ]; then
-            next="$line"
-            break
-        fi
-        [ "$ADDRESS" = "$current_address" ] && found=1
-    done < "$FILE_FAVORITES"
-
-    [ -z "$next" ] && next="$first"
-
-    generate_config "$next" > "$FILE_XRAY_CONF" || exit 1
-
-    if start_xray "$FILE_XRAY_CONF"; then
-        if check_connection; then
-            echo "Info: Switched to next server: $ADDRESS:$PORT"
-            rm -f "$FILE_LOCK"
-            exit 0
-        fi
-    fi
-
-    echo "Warning: This server is unavailable, please switch to another one."
-    rm -f "$FILE_LOCK"
-    exit 1
-}
-
 main() {
     if [ -f "$FILE_LOCK" ]; then
         echo "Warning: Another instance is running (lock file exists)."
@@ -404,7 +363,6 @@ main() {
         local current_address=$(jsonfilter -e '@.outbounds[0].settings.address' -e '@.outbounds[0].settings.vnext[0].address' < "$FILE_XRAY_CONF" 2>/dev/null | grep -m1 .)
         if [ -n "$current_address" ] && grep -q "$current_address" "$FILE_FAVORITES" 2>/dev/null; then
             echo "Info: The connection works!"
-            rm -f "$FILE_LOCK"
             exit 0
         fi
     fi
@@ -417,31 +375,32 @@ main() {
             
             if start_xray "$FILE_XRAY_CONF" && check_connection; then
                 echo "Info: Connection established, current server $ADDRESS:$PORT."
-                rm -f "$FILE_LOCK"
                 exit 0
             fi
         done < "$FILE_FAVORITES"
     fi
 
+    if ! update_source; then
+        exit 1
+    fi
+    
     rm -f "$FILE_LOCK"
 
     echo "Warning: No available servers found, trying to rebuild the favorites list..."
     build_favorites
 
-    if [ ! -s "$FILE_FAVORITES" ]; then
-        echo "Error: No active servers found in source file. Use 'vless-watchdog update'."
-        exit 1
-    else
-        echo "Info: Favorites list rebuilt successfully. Use 'vless-watchdog main'."
+    if [ -s "$FILE_FAVORITES" ]; then
+        echo "Info: Favorites list rebuilt successfully. Run 'vless-watchdog main' to connect."
         exit 0
     fi
+
+    exit 1
 }
 
 case "$1" in
     update) update_source ;;
     build) build_favorites ;;
-    next) switch_next ;;
     main) main ;;
     all) update_source && build_favorites && main ;;
-    *) echo "Usage: $0 {update|build|next|main|all}"; exit 1 ;;
+    *) echo "Usage: $0 {update|build|main|all}"; exit 1 ;;
 esac
