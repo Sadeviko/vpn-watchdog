@@ -142,7 +142,7 @@ generate_config() {
                 grpc)
                     transport="\"grpcSettings\": { \"serviceName\": \"${servicename:-grpc}\""
                     [ -n "$authority" ] && transport="${transport}, \"authority\": \"$authority\""
-                    [ "$mode" = "gun" ] || [ "$mode" = "multi" ] && transport="${transport}, \"multiMode\": true"
+                    [ "$mode" = "multi" ] && transport="${transport}, \"multiMode\": true"
                     transport="${transport} }"
                     ;;
                 xhttp)
